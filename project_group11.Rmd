@@ -1,0 +1,354 @@
+---
+title: "ECON413"
+author: "Abdullah Yüksel, Davut Emre Özkan, Yasemin Hece"
+output: html_document
+---
+
+# Covid-19 Vaccination Effectiveness on Cases and Deaths
+
+<style>
+body               {background-color : white; text-align: justify ; font-size : 180%;}
+h1                 {color : cadet blue ; font-family : Source Sans Pro; font-size :200%; font-weight:bold;}
+h2                 {color : midnight blue ; font-family : Source Sans Pro ; font-size : 150%; font-weight : bold;}
+p                  {color : cadet blue ; font-family : Source Sans Pro ; font-size : 100%;}
+table, th, td      {text-align: left; font-family : Source Sans Pro; font-size : 100%; margin-top : 20px}
+th,td              {border-bottom : 0.5px cadet blue;}
+figure             {size : 100%}
+</style>
+
+```{r setup, include=FALSE}
+library(data.table)
+library(ggplot2)
+library(readxl)
+library(readr)
+library(readr)
+library(lubridate)
+library(mice)
+library(plm)
+library(dyn)
+library(stargazer)
+library(ggpubr)
+library(gridExtra)
+library(graphics)
+library(sjPlot)
+library(rgdal)
+library(dplyr)
+library(data.table)
+library(haven)
+```
+## {.tabset .tabset-fade}
+
+```{r coding, include=FALSE}
+
+theme_413 <- theme(plot.title = element_text(face = "bold"), plot.subtitle = element_text(size = 10),
+                        panel.background = element_rect(fill = "white"), plot.background=element_rect(fill="gray"),
+                        legend.title = element_text(size=12, face = "bold"), legend.position = "right", legend.box = "horizontal",
+                        axis.title.y = element_text(face = "bold"), axis.title.x = element_text(face = "bold"))
+
+# Covid Data
+covid_data <- read_csv("DATA/owid-covid-data.csv")
+setDT(covid_data)
+setnames(covid_data, "location","country")
+
+# Google Index Data
+google_index <- read_csv("DATA/changes-visitors-covid.csv")
+setDT(google_index)
+setnames(google_index,"Day","date")
+setnames(google_index, "Entity", "country")
+
+# Google Index countries
+countries <- unique(google_index$country)
+
+# Merging
+data_model <- merge(covid_data,google_index,all = TRUE)
+data_model <- data_model[country%in%countries]
+
+# Adding Moving Averages
+k <- 14
+roll <- function(x) rollapplyr(x, k+1, function(x) sum(x[-k-1]), fill = NA)
+data_model <- data.table(transform(data_model, 
+                             active_cases_14 = ave(new_cases, 
+                                                   country, FUN = roll)))
+k <- 21
+roll <- function(x) rollapplyr(x, k+1, function(x) sum(x[-k-1]), fill = NA)
+data_model <- data.table(transform(data_model, 
+                               active_cases_21 = ave(new_cases, 
+                                                     country, FUN = roll)))
+
+# Adding New Columns
+data_model[, new_death_rate := new_deaths_smoothed/new_cases_smoothed]
+data_model[, people_fully_vaccinated_rate := people_fully_vaccinated/population]
+data_model[, new_case_rate_population := new_cases_smoothed/population]
+data_model[, new_case_rate_tests := new_cases_smoothed/new_tests_smoothed]
+data_model[, active_cases_14_per_thousands := active_cases_14/1000]
+data_model[, beds_per_active := active_cases_14/((population/1000)*hospital_beds_per_thousand)]
+data_model[, fatality := new_deaths_smoothed/active_cases_21]
+
+# Cleaning Data
+data_model <- data_model[, .(country,date,continent,new_cases, new_cases_smoothed, new_deaths, new_deaths_smoothed, new_tests,
+                             people_fully_vaccinated_rate, residential,reproduction_rate, stringency_index, population,
+                             active_cases_14, active_cases_14_per_thousands, beds_per_active,fatality,
+                             new_death_rate,new_case_rate_population, new_case_rate_tests,icu_patients, excess_mortality)]
+
+
+first_death_rate <- data_model[date == "2021-03-01", .(people_fully_vaccinated_rate, new_death_rate, 
+                                                 new_case_rate_population, new_case_rate_tests ,time = "The First Day"), by = "country"]
+last_death_rate <- data_model[date == "2022-02-01", .(people_fully_vaccinated_rate, new_death_rate, 
+                                                new_case_rate_population, new_case_rate_tests ,time = "The Last Day"), by = "country"]
+first_last <- rbind(first_death_rate,last_death_rate)
+
+
+# Data Analysis Charts 
+first_day_death_chart <- ggplot(data = first_death_rate, aes(x = people_fully_vaccinated_rate, y = new_death_rate)) + 
+  geom_point(size = 2, colour="#F8766D") + ylim(0, 0.04) + xlim(0,0.1) + geom_smooth(colour="#F8766D", se=FALSE) +
+  labs(title = "Death Ratio (Figure.1)", subtitle = "2021-03-01",
+       caption = "Source = Our World in Data", x = "People Fully Vaccinated", y = "Death Ratio") + theme_413
+
+last_day_death_chart <- ggplot(data = last_death_rate, aes(x = people_fully_vaccinated_rate, y = new_death_rate)) + 
+  geom_point(size = 2, color = "#00BFC0") + geom_smooth(color="#00BFC0", se=FALSE) + ylim(0, 0.04) +
+  labs(title = "Death Ratio (Figure.2)", subtitle = "2022-02-01",
+       caption = "Source = Our World in Data", x = "People Fully Vaccinated", y = "Death Ratio") + theme_413
+
+first_last_death <- ggplot(data = first_last, aes(x = people_fully_vaccinated_rate, y = new_death_rate)) + 
+  geom_point(size = 2) + geom_smooth(se=FALSE) + ylim(0, 0.04) +
+  labs(title = "Death Ratio", subtitle = "Smoothed",
+       caption = "Source = Our World in Data", x = "People Fully Vaccinated", y = "Death Ratio") + theme_413
+
+first_day_case_chart <- ggplot(data = first_death_rate, aes(x = people_fully_vaccinated_rate, y = new_case_rate_tests)) +
+  geom_point(size = 2, colour="#F8766D") + geom_smooth(se=FALSE, colour="#F8766D") +  ylim(0,1) +
+  labs(title = "Case Ratio (Figure.3)", subtitle = "2021-03-01",
+       caption = "Source = Our World in Data", x = "People Fully Vaccinated", y = "Case Ratio") + xlim(0,0.06) + theme_413
+
+last_day_case_chart <- ggplot(data = last_death_rate, aes(x = people_fully_vaccinated_rate, y = new_case_rate_tests, color = time)) + geom_point(size = 2, color = "#00BFC0") + geom_smooth(color = "#00BFC0", se=FALSE) +  ylim(0,1) +
+  labs(title = "Case Ratio (Figure.4)", subtitle = "2022-02-01",
+       caption = "Source = Our World in Data", x = "People Fully Vaccinated", y = "Case Ratio") + theme_413
+
+stringency_index_graph <- ggplot(data = data_model[continent != "Oceania"][date =="2021-01-01"| date =="2021-03-01"| date =="2021-05-01"|
+                                           date =="2021-07-01" | date =="2021-09-01" | date =="2021-11-01" | date =="2022-01-01"], 
+       aes(x = date , y = stringency_index, color= continent)) + labs(title = "Stringecny Index (Figure.5)", x = "Stringency Index", y = "Date") +geom_smooth(se=FALSE) + theme_413
+
+# MAP
+mapdata <- map_data("world") #ggplot
+setnames(covid_data,"country","region")
+first_data <- covid_data[date=="2021-07-16"]
+last_data<- covid_data[date=="2022-01-01"]
+
+first_maps<- left_join(mapdata,first_data,by="region")
+last_maps <- left_join(mapdata,last_data,by="region")
+
+map_1<- ggplot(first_maps , aes(long, lat, group = group,fill = new_deaths_per_million)) +
+  geom_polygon( )+
+  coord_equal(ratio = 1.5, xlim = NULL, ylim = NULL, expand = T) +
+  ylim(-60, 85)+ 
+  labs(title = "New Deaths Per Million (Figure.6)" , subtitle = "2021-07-16",caption = "Source:ourworldindata.org")+
+  scale_fill_distiller(name="", palette = "Spectral", na.value = "white")+theme_413
+
+map_2<- ggplot(first_maps, aes(long, lat, group = group,fill = new_cases_per_million)) + geom_polygon( )+
+  coord_equal(ratio = 1.5, xlim = NULL, ylim = NULL, expand = T) +
+  ylim(-60, 85)+ labs(title = "New Cases Per Million (Figure.7)" , subtitle = "2021-07-16",caption = "Source:ourworldindata.org")+
+  scale_fill_distiller(name="", palette = "Spectral", na.value = "white")+theme_413
+
+map_3 <- ggplot(last_maps, aes(long, lat, group = group,fill = new_cases_per_million)) + geom_polygon( )+
+  coord_equal(ratio = 1.5, xlim = NULL, ylim = NULL, expand = T) +
+  ylim(-60, 85)+ labs(title = "New Cases Per Million (Figure.8)",subtitle="2022-01-01",caption = "Source:ourworldindata.org")+
+  scale_fill_distiller(name="", palette = "Spectral", na.value = "white")+theme_413
+
+map_4<- ggplot(last_maps, aes(long, lat, group = group,fill = new_deaths_per_million)) + geom_polygon( )+
+  coord_equal(ratio = 1.5, xlim = NULL, ylim = NULL, expand = T) +
+  ylim(-60, 85)+ labs(title = "New Deaths Per Million (Figure.9)",subtitle="2022-01-01",caption = "Source:ourworldindata.org")+
+  scale_fill_distiller(name="", palette = "Spectral", na.value = "white")+theme_413
+  
+
+
+
+# Death Models
+
+death_model <- plm(new_deaths_smoothed ~ lag(people_fully_vaccinated_rate,14) + 
+                     lag(active_cases_14_per_thousands,14)+
+                     lag(icu_patients,14) +
+                     lag(beds_per_active,14) +
+                     lag(stringency_index,14),
+                     data = data_model, index = c("country", "date"), model = "within")
+# Case Models
+case_model <- plm(new_cases ~ lag(people_fully_vaccinated_rate, 14) +
+                 active_cases_14 +
+                 new_tests + 
+                 new_deaths_smoothed +
+                 residential + 
+                 reproduction_rate +
+                 lag(stringency_index, 7), 
+               data = data_model, 
+               model = "within")
+```
+
+### <span style="color:black"> Introduction </span>
+<br>  
+![](DATA/total_numbers_last.png){width=75%}
+<br>  
+&nbsp;The new type of coronavirus, also known as SARS-CoV-2, which is known to have emerged in Wuhan, China in 2019, spread to all parts of the world in the future, and the World Health Organization declared a pandemic on March 11, 2020. The virus, which manifested itself with various symptoms, was more severe in people with chronic diseases and in elderly people. It was tried to prevent the spread with individual and social measures. As of 2021, vaccination studies have started.Currently, there are a total of variety variants, including alpha, beta, gamma, delta, and omicron.  
+&nbsp;In this project, our aimis to examine the number of cases and deaths, country restrictions and the number of vaccinations for countries over time, and to analyze the effect of vaccination on cases and deaths as a result of regression analysis.
+  
+### <span style="color:black"> Literature survey </span>
+
+#### **Effectiveness of COVID-19 vaccines against SARS-CoV-2 variants of concern: a systematic review and meta-analysis** 
+<br>
+
+&nbsp; It is published in China. This study is a meta-analysis to provide a comprehensive overview of the effectiveness  of the Covid-19 vaccines.  
+
+* Method   
+  + Published and preprinted all randomized controlled trials,  cohort, and case control studies that evaluates the VE were searched until 31 August 2021.  
+  + 7 RCTs (51,169 participants)  
+  + 10 cohort studies (14,385,909 participants)  
+  + 16 case-control studies (734,607 cases)  
+  + Pooled estimates and 95% confidence intervals (CIs) were calculated using random-effects meta-analysis.  
+
+* Results   
+  + Full vaccination is effective against  
+Alpha with VE of 88.3% (95% CI, 82.4–92.2)  
+Beta/Gamma with VE of 70.7% (95% CI, 59.9–78.5)  
+Delta with VE of 71.6% (95% CI,64.1–77.4)  
+  + Partial vaccination is effective against  
+Alpha with VE of 59.0% (95% CI, 51.3–65.5)  
+Beta/Gamma with VE of  49.3% (95% CI, 33.0–61.6)  
+Delta with VE of 52.6% (95% CI, 43.3–60.4)  
+<br>
+
+<hr>
+#### **Effectiveness of COVID-19 vaccines in preventing SARS-CoV-2 infection and hospitalisation, Navarre, Spain, January to April 2021** 
+<br> 
+
+&nbsp; This study, conducted in Spain, examined the spread of the vaccine to people in close contact with confirmed cases and its effect on symptoms.
+
+* Method   
+  + Vaccine effectiveness was calculated as a percentage.
+  + The relationship between vaccination and age groups was measured.
+  + The effect of the increase in the number of doses on the effect of the vaccine was examined.
+* Cohort    
+  + 20,961 close contacts of confirmed covid-19 cases  
+  + 7,240 (34.5%) were confirmed as infected with SARS-CoV-2,   
+  + 5,467 (26.1%) having symptomatic infections,  
+  + 559 (2.7%) needing hospitalisation for COVID-19    
+* Results
+  + The covid-19 vaccine appears to have a moderate effect in preventing transmission, while a higher effect is seen in symptomatic and hospitalized cases.
+  + It was observed that a single dose had a moderate effect and the second dose increased it.  
+<br>
+
+<hr>
+#### **WHO - Evaluation of COVID-19 vaccine effectiveness**
+<br>
+&nbsp; We have benefited from the guidance of the World Healh Organization while we are doing our research. In this article, the WHO explains how to conduct a research more precisely. Most of the material guidance is about clinical studies, but one item is important for us.  
+
+&nbsp; For the primary analysis of VE studies, a conservative approach is recommended in considering a person as potentially protected from vaccination only from 14 days after the date of vaccination (the time required to achieve protection for the majority of vaccine recipients for most vaccines), for both first and (if applicable) second doses of vaccine. Secondary analyses with different time intervals post-vaccination can be conducted to help guide future policy.  
+  
+Due to this advise of the WHO, we have used the 14-days lagged vaccination rates in our regression.
+  
+### <span style="color:black"> Data Analysis </span>  
+
+```{r first_day_death_chart, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+grid.arrange(first_day_death_chart, last_day_death_chart,ncol=2)
+```
+  
+&nbsp; The first graph is from March 1, 2021. X-axis represents the proportion of full vaccinated (2 doses) people to the population of the country, Y-axis represents the deaths/cases ratio in March 1. There is no correlation or causal relationship between vaccinations and deaths. The graph is not clear.   
+  
+&nbsp; The second graph is from February 2, 2022. It is obvious that as total vaccination rate increses the death/case ratio decreases. So, there is a negative relationship, as expected.  
+  
+```{r first_last_day_case_chart, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+grid.arrange( first_day_case_chart, last_day_case_chart,ncol=2)
+```
+  
+&nbsp; This graph on the left is from  March 1, 2021. On the horizontal axis, the ratio of people fully vaccinated are represented, and on the vertical axis the ratio of daily positive cases among daily total cases.  
+Vaccinations have increased, countries are intensified in the right side of the  graph, but there is no decrease in the new cases ratio. 
+This can result from various factors. But, on of the most important factor is the policies which are implemented by public administrations. 
+Our data have an index called stringency. This index represents a composite measure based on 9 response indicators including school closures, workplace closures, and travel bans. It is a number from 0 to 100 (100 = strictest response). The next figure represents the average stringency index by continents over time. There is a high tendency to loose the policies. This is th one of most important reasons underlying the increase in the cases laslty.
+  
+  
+```{r stringency_index_graph, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+stringency_index_graph
+```
+
+
+```{r maps, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+map_2
+map_3
+map_1
+map_4
+```
+<br>
+&nbsp; Comparisons can be made between two dates, which are chosen at almost 6-month intervals on the maps, as new death per million and new cases per million.  
+ The reason for choosing the dates is due to the intensification of vaccination in this 6-month interval.
+&nbsp; When we look at the new cases per million maps between the two dates, we first notice that the rates have increased. Afterwards, it is noticed that the ratio of Australia and Canada has increased between countries. The map of USA and Russia could not be shown due to missing data. When we look at the situation of Turkey, we see that there is no significant change in the ranking among other countries, despite the increase in the rate.  
+
+&nbsp; When we look at the new deaths per million between the two dates, we can see that there has been a significant decrease in the scale. On the other hand, while the maximum level was experienced in the South African country on 16-07-2021, it was experienced in the countries in the northwest of Turkey and some European countries on 01-01-2022.
+
+### <span style="color:black"> Case Model </span>  
+  
+$New Cases = -2147xVaccination + 0.07xActive + 0.04xTests - 18.97xDeaths$ 
+$+ 268.26xResidential + 8253xReproduction - 32.08xStringency$
+
+
+<br>  
+
+* new cases   
+  + New confirmed cases of COVID-19. Counts can include probable cases, where reported.
+* vaccine
+  + Vaccine is the percentage of people who fully vaccinated among the population. (at least 2 doses).
+* active cases
+  + The cumulative case number of last 14 days.
+* new tests
+  + New tests for COVID-19, daily.
+* new deaths smoothed
+  + New deaths attributed to COVID-19 (7-day smoothed). Counts can include probable deaths, where reported.
+* residential
+  + Mobility of Google users in residential.
+* reproduction rate
+  + Real-time estimate of the effective reproduction rate. 
+* stringency index
+  + Government Response Stringency Index: composite measure based on 9 response indicators including school closures, workplace closures, and travel bans, rescaled to a value from 0 to 100 (100 = strictest response).
+
+  
+
+<br>
+```{r case_model, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+tab_model(case_model)
+```  
+
+  
+### <span style="color:black"> Death Model</span>  
+  
+$deaths = -37.59*vaccine + 0.03*cases + 0.09*icu + 4.48*hospital - 0.32*policy$
+
+<br>  
+
+* deaths   
+  + This variable is the number of new daily deaths
+* vaccine
+  + Vaccine is the ratio of people who fully vaccinateds among the population. (at least 2 doses)
+* cases
+  + It expresses the number of active cases per thousands. Each case is counted for 14 days. It is basically a 14 days cumulative moving average.
+* icu
+  + ICU is the number of Covid-19 patients in intensive care units on a given day
+* hospital
+  + This variable represents the hospital occupancy. It is calculated by dividing the case number with the hospital capacity. So, if this variable is high, it means more occupation.
+* policy
+  + This is the stringency index, a composite measure based on policies from 0 to 100. The higher it is, the strictier the policies.
+
+```{r death_model, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+tab_model(death_model)
+```
+<br>
+&nbsp; The R2 is 80%. The model explains the 80% of the variation in the number of deaths throught time with the given regression equation.
+Model shows us that the policy variable has negative coefficients which is reasonable. Therefore, if vaccination increases number of deaths decreases. Also, if governments implement more stricter policies, the number of deaths decreases.  
+&nbsp; On the other hand, number of active cases, number of ICU patients and hospital occupancy rate have all positive coefficients, which means they have a positive relationship with the number of deaths. A high number of active cases cause the pandemic to grow more, and as a result people who are in the risk group can be infected more easily. The result can be deathly. So, this increases the deaths.
+Number of ICU patiens are people who are affected by Coronavirus heavily, so it increases the deaths.
+The model also shows that countries are more successful in the fight with Covid-19 when the hospital occupancy rate is low. 
+<br>
+&nbsp; The main goal of this research was analysing the vaccine effectiveness on Covid-19 cases and deaths. This regression shows that the explanatory variable "vaccine" is a significant variable which predicts the death number. 
+
+### <span style="color:black"> Result </span>
+
+&nbsp; Both models are built with linear regression for panel data. When the r square values are examined, both models are significant, and when the t values are examined, all variables are individually significant.  
+&nbsp;  According to case model, when people fully vaccinated rate increases by 1%, new cases will decrease by -21.47.  
+&nbsp;  According to death model, when people fully vaccinated rate increases by 1%, new deaths
+will decrease by 0.37.  
+As a result, vaccination has an considerable effect on both cases and deaths.
+Missing values in both models, insufficient tests and not taking into account the effect of variants may be the limitations of the models.
